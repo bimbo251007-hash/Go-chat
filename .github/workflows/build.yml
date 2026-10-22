@@ -1,0 +1,145 @@
+name: Build & Test
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      server_url:
+        description: "عنوان السيرفر (مثال: http://192.168.1.10:3000 أو https://api.example.com). سيبه فاضي لمحاكي أندرويد (10.0.2.2)"
+        required: false
+        default: ""
+      build_mode:
+        description: "نوع البناء (release بيحتاج https)"
+        type: choice
+        options: [debug, release]
+        default: debug
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------
+  # 1) السيرفر: بناء TypeScript + تشغيله على Postgres حقيقي + فحص /health
+  # ---------------------------------------------------------------
+  server:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: ci_password
+          POSTGRES_DB: app
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U app"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://app:ci_password@localhost:5432/app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+        continue-on-error: true   # لو مفيش package-lock.json
+
+      - name: Install
+        working-directory: server
+        run: npm install
+
+      - name: Build (tsc)
+        working-directory: server
+        run: npm run build
+
+      - name: Load schema
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f server/schema.sql
+
+      - name: Smoke test
+        working-directory: server
+        env:
+          NODE_ENV: development
+          PORT: "3000"
+          MEDIA_DIR: ./uploads
+        run: |
+          export JWT_SECRET="$(openssl rand -hex 48)"
+          node dist/index.js > server.log 2>&1 &
+          for i in $(seq 1 20); do
+            if curl -fsS http://localhost:3000/health; then echo; echo "Server OK"; exit 0; fi
+            sleep 1
+          done
+          echo "Server did not start:"; cat server.log; exit 1
+
+  # ---------------------------------------------------------------
+  # 2) تطبيق Flutter: توليد مشروع أندرويد + بناء APK
+  # ---------------------------------------------------------------
+  apk:
+    runs-on: ubuntu-latest
+    env:
+      BUILD_MODE: ${{ inputs.build_mode || 'debug' }}
+      SERVER_URL: ${{ inputs.server_url || '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      # الريبو فيه lib/ و pubspec.yaml بس، فبنولّد مجلد android وننقل كودك فوقه
+      - name: Generate Android project
+        run: |
+          flutter create --platforms=android --project-name chat_app --org com.example.chatapp build_app
+          rm -rf build_app/lib build_app/test
+          cp -r mobile/lib build_app/lib
+          cp mobile/pubspec.yaml build_app/pubspec.yaml
+
+      - name: Set server URL
+        if: env.SERVER_URL != ''
+        run: |
+          API="${SERVER_URL%/}"
+          WS="${API/https:\/\//wss://}"
+          WS="${WS/http:\/\//ws://}"
+          printf "const apiBase = '%s';\nconst wsBase = '%s';\n" "$API" "$WS" > build_app/lib/core/config.dart
+          cat build_app/lib/core/config.dart
+
+      - name: Patch Android (permissions, cleartext, minSdk)
+        run: |
+          M=build_app/android/app/src/main/AndroidManifest.xml
+          sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.RECORD_AUDIO"/>\n    <uses-permission android:name="android.permission.CAMERA"/>\n    <application#' "$M"
+          if [ "$BUILD_MODE" = "debug" ]; then
+            sed -i 's#<application#<application android:usesCleartextTraffic="true"#' "$M"
+          fi
+          sed -i 's/flutter\.minSdkVersion/23/' build_app/android/app/build.gradle*
+          cat "$M"
+
+      - name: Pub get
+        working-directory: build_app
+        run: flutter pub get
+
+      - name: Analyze
+        working-directory: build_app
+        continue-on-error: true
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+
+      - name: Build APK
+        working-directory: build_app
+        run: flutter build apk --${{ env.BUILD_MODE }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chat-app-${{ env.BUILD_MODE }}-apk
+          path: build_app/build/app/outputs/flutter-apk/*.apk
+          retention-days: 14
