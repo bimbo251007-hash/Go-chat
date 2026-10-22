@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       server_url:
-        description: "عنوان السيرفر (مثال: http://192.168.1.10:3000 أو https://api.example.com). سيبه فاضي لمحاكي أندرويد (10.0.2.2)"
+        description: "عنوان السيرفر (مثال: http://192.168.1.10:3000). سيبه فاضي لمحاكي أندرويد"
         required: false
         default: ""
       build_mode:
@@ -21,9 +21,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ---------------------------------------------------------------
-  # 1) السيرفر: بناء TypeScript + تشغيله على Postgres حقيقي + فحص /health
-  # ---------------------------------------------------------------
   server:
     runs-on: ubuntu-latest
     services:
@@ -47,28 +44,38 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
-          cache-dependency-path: server/package-lock.json
-        continue-on-error: true   # لو مفيش package-lock.json
+
+      - name: Detect server folder
+        run: |
+          P=$(find . -type f -path '*/server/package.json' -not -path '*/node_modules/*' | head -1)
+          if [ -z "$P" ]; then
+            P=$(grep -rl --include=package.json '"chat-server"' . --exclude-dir=node_modules | head -1)
+          fi
+          if [ -z "$P" ]; then
+            echo "::error::مش لاقي مجلد السيرفر (server/package.json). ده شكل الريبو:"
+            find . -not -path './.git/*' | head -60
+            exit 1
+          fi
+          SERVER_DIR=$(dirname "$P")
+          echo "Server folder: $SERVER_DIR"
+          echo "SERVER_DIR=$SERVER_DIR" >> "$GITHUB_ENV"
 
       - name: Install
-        working-directory: server
-        run: npm install
+        run: cd "$SERVER_DIR" && npm install
 
       - name: Build (tsc)
-        working-directory: server
-        run: npm run build
+        run: cd "$SERVER_DIR" && npm run build
 
       - name: Load schema
-        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f server/schema.sql
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$SERVER_DIR/schema.sql"
 
       - name: Smoke test
-        working-directory: server
         env:
           NODE_ENV: development
           PORT: "3000"
           MEDIA_DIR: ./uploads
         run: |
+          cd "$SERVER_DIR"
           export JWT_SECRET="$(openssl rand -hex 48)"
           node dist/index.js > server.log 2>&1 &
           for i in $(seq 1 20); do
@@ -77,9 +84,6 @@ jobs:
           done
           echo "Server did not start:"; cat server.log; exit 1
 
-  # ---------------------------------------------------------------
-  # 2) تطبيق Flutter: توليد مشروع أندرويد + بناء APK
-  # ---------------------------------------------------------------
   apk:
     runs-on: ubuntu-latest
     env:
@@ -87,6 +91,21 @@ jobs:
       SERVER_URL: ${{ inputs.server_url || '' }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Detect mobile folder
+        run: |
+          P=$(find . -type f -path '*/mobile/pubspec.yaml' -not -path '*/node_modules/*' | head -1)
+          if [ -z "$P" ]; then
+            P=$(grep -rl --include=pubspec.yaml '^name: chat_app' . | head -1)
+          fi
+          if [ -z "$P" ]; then
+            echo "::error::مش لاقي مجلد التطبيق (mobile/pubspec.yaml). ده شكل الريبو:"
+            find . -not -path './.git/*' | head -60
+            exit 1
+          fi
+          MOBILE_DIR=$(dirname "$P")
+          echo "Mobile folder: $MOBILE_DIR"
+          echo "MOBILE_DIR=$MOBILE_DIR" >> "$GITHUB_ENV"
 
       - uses: actions/setup-java@v4
         with:
@@ -98,13 +117,12 @@ jobs:
           channel: stable
           cache: true
 
-      # الريبو فيه lib/ و pubspec.yaml بس، فبنولّد مجلد android وننقل كودك فوقه
       - name: Generate Android project
         run: |
           flutter create --platforms=android --project-name chat_app --org com.example.chatapp build_app
           rm -rf build_app/lib build_app/test
-          cp -r mobile/lib build_app/lib
-          cp mobile/pubspec.yaml build_app/pubspec.yaml
+          cp -r "$MOBILE_DIR/lib" build_app/lib
+          cp "$MOBILE_DIR/pubspec.yaml" build_app/pubspec.yaml
 
       - name: Set server URL
         if: env.SERVER_URL != ''
