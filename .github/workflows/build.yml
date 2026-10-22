@@ -41,6 +41,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Unzip project if needed
+        run: |
+          if ! find . -type f -path '*/server/package.json' -not -path './.git/*' | grep -q .; then
+            Z=$(find . -maxdepth 2 -name '*.zip' -not -path './.git/*' | head -1)
+            if [ -n "$Z" ]; then
+              echo "Unzipping $Z"
+              unzip -q -o "$Z" -d extracted
+            fi
+          fi
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -49,10 +59,7 @@ jobs:
         run: |
           P=$(find . -type f -path '*/server/package.json' -not -path '*/node_modules/*' | head -1)
           if [ -z "$P" ]; then
-            P=$(grep -rl --include=package.json '"chat-server"' . --exclude-dir=node_modules | head -1)
-          fi
-          if [ -z "$P" ]; then
-            echo "::error::مش لاقي مجلد السيرفر (server/package.json). ده شكل الريبو:"
+            echo "::error::مش لاقي مجلد السيرفر. ده شكل الريبو:"
             find . -not -path './.git/*' | head -60
             exit 1
           fi
@@ -92,14 +99,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Unzip project if needed
+        run: |
+          if ! find . -type f -path '*/mobile/pubspec.yaml' -not -path './.git/*' | grep -q .; then
+            Z=$(find . -maxdepth 2 -name '*.zip' -not -path './.git/*' | head -1)
+            if [ -n "$Z" ]; then
+              echo "Unzipping $Z"
+              unzip -q -o "$Z" -d extracted
+            fi
+          fi
+
       - name: Detect mobile folder
         run: |
           P=$(find . -type f -path '*/mobile/pubspec.yaml' -not -path '*/node_modules/*' | head -1)
           if [ -z "$P" ]; then
-            P=$(grep -rl --include=pubspec.yaml '^name: chat_app' . | head -1)
-          fi
-          if [ -z "$P" ]; then
-            echo "::error::مش لاقي مجلد التطبيق (mobile/pubspec.yaml). ده شكل الريبو:"
+            echo "::error::مش لاقي مجلد التطبيق. ده شكل الريبو:"
             find . -not -path './.git/*' | head -60
             exit 1
           fi
