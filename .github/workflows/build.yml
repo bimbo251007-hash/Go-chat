@@ -59,13 +59,21 @@ jobs:
         run: |
           P=$(find . -type f -path '*/server/package.json' -not -path '*/node_modules/*' | head -1)
           if [ -z "$P" ]; then
-            echo "::error::مش لاقي مجلد السيرفر. ده شكل الريبو:"
+            P=$(grep -rl --include=package.json '"chat-server"' . --exclude-dir=node_modules | head -1)
+          fi
+          if [ -z "$P" ]; then
+            echo "::error::مش لاقي مجلد السيرفر (server/package.json). ده شكل الريبو:"
             find . -not -path './.git/*' | head -60
             exit 1
           fi
           SERVER_DIR=$(dirname "$P")
           echo "Server folder: $SERVER_DIR"
           echo "SERVER_DIR=$SERVER_DIR" >> "$GITHUB_ENV"
+
+      - name: Fix push.ts type error
+        run: |
+          sed -i 's/^  return sa;$/  return sa ?? null;/' "$SERVER_DIR/src/push.ts"
+          sed -n 10,16p "$SERVER_DIR/src/push.ts"
 
       - name: Install
         run: cd "$SERVER_DIR" && npm install
@@ -113,7 +121,10 @@ jobs:
         run: |
           P=$(find . -type f -path '*/mobile/pubspec.yaml' -not -path '*/node_modules/*' | head -1)
           if [ -z "$P" ]; then
-            echo "::error::مش لاقي مجلد التطبيق. ده شكل الريبو:"
+            P=$(grep -rl --include=pubspec.yaml '^name: chat_app' . | head -1)
+          fi
+          if [ -z "$P" ]; then
+            echo "::error::مش لاقي مجلد التطبيق (mobile/pubspec.yaml). ده شكل الريبو:"
             find . -not -path './.git/*' | head -60
             exit 1
           fi
@@ -137,6 +148,11 @@ jobs:
           rm -rf build_app/lib build_app/test
           cp -r "$MOBILE_DIR/lib" build_app/lib
           cp "$MOBILE_DIR/pubspec.yaml" build_app/pubspec.yaml
+
+      - name: Upgrade record package
+        run: |
+          sed -i 's/^  record: .*/  record: ^6.0.0/' build_app/pubspec.yaml
+          grep -n "record" build_app/pubspec.yaml
 
       - name: Set server URL
         if: env.SERVER_URL != ''
