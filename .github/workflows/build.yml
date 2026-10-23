@@ -16,6 +16,9 @@ on:
         options: [debug, release]
         default: debug
 
+permissions:
+  contents: write
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -196,12 +199,40 @@ jobs:
           EOF
           cat ~/.gradle/init.d/force-sdk.gradle
 
+      - name: Prepare signing key (same key every build)
+        run: |
+          mkdir -p ~/.android
+          KS=.github/signing/debug.keystore
+          if [ -f "$KS" ]; then
+            echo "Using saved signing key"
+            cp "$KS" ~/.android/debug.keystore
+          else
+            echo "Creating a new signing key (first time only)"
+            rm -f ~/.android/debug.keystore
+            keytool -genkeypair -v -keystore ~/.android/debug.keystore \
+              -storepass android -keypass android -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+            mkdir -p .github/signing
+            cp ~/.android/debug.keystore "$KS"
+            git config user.name "github-actions"
+            git config user.email "github-actions@users.noreply.github.com"
+            git add "$KS"
+            git commit -m "Add app signing key"
+            git push || echo "WARNING: could not save the key to the repo"
+          fi
+
       - name: Build APK
         working-directory: build_app
-        run: flutter build apk --${{ env.BUILD_MODE }}
+        run: flutter build apk --${{ env.BUILD_MODE }} --build-number=${{ github.run_number }} --build-name=1.0.${{ github.run_number }}
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: chat-app-${{ env.BUILD_MODE }}-apk
-          path: build_app/build/app/outputs/flutter-apk/*.apk
-          retention-days: 14
+      - name: Publish APK to Releases
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp build_app/build/app/outputs/flutter-apk/app-${BUILD_MODE}.apk chat-app.apk
+          gh release delete latest --yes --cleanup-tag --repo "${{ github.repository }}" || true
+          gh release create latest chat-app.apk --repo "${{ github.repository }}" \
+            --title "Latest build #${{ github.run_number }}" \
+            --notes "نسخة جاهزة للتثبيت (build #${{ github.run_number }})"
