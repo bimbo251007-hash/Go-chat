@@ -224,7 +224,15 @@ jobs:
 
       - name: Build APK
         working-directory: build_app
-        run: flutter build apk --${{ env.BUILD_MODE }} --build-number=${{ github.run_number }} --build-name=1.0.${{ github.run_number }}
+        run: flutter build apk --${{ env.BUILD_MODE }} --target-platform android-arm64 --build-number=${{ github.run_number }} --build-name=1.0.${{ github.run_number }}
+
+      - name: Verify APK
+        run: |
+          APK=build_app/build/app/outputs/flutter-apk/app-${BUILD_MODE}.apk
+          ls -lh "$APK"
+          unzip -tq "$APK"
+          AS="$(ls -d $ANDROID_HOME/build-tools/*/ | sort -V | tail -1)apksigner"
+          "$AS" verify --verbose "$APK" | head -20
 
       - name: Publish APK to Releases
         if: github.event_name != 'pull_request'
